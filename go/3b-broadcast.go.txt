@@ -1,0 +1,134 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"reflect"
+
+	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
+)
+
+var messages = []int{}
+
+var neighbors = []string{}
+
+func main() {
+	n := maelstrom.NewNode()
+
+	n.Handle("broadcast", func(msg maelstrom.Message) error {
+		// Unmarshal the message body as an loosely-typed map.
+		var body map[string]any
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+
+		// Save the "message" value locally
+		// NOTE: JSON-encoded number value would be mostly float64 type.
+		message := int(body["message"].(float64))
+
+		// If "message" value is in local store, it means already broadcasted.
+		if isExistingMessage(message, messages) {
+			return nil
+		}
+
+		messages = append(messages, message)
+
+		// Send/broadcast the "message" to neighbor nodes
+		for _, node := range neighbors {
+			if err := n.Send(node, body); err != nil {
+				return err
+			}
+		}
+
+		// Update the message type to return back.
+		body["type"] = "broadcast_ok"
+
+		// Remove the "message" type
+		delete(body, "message")
+
+		// Echo the original message back with the updated message type.
+		return n.Reply(msg, body)
+	})
+
+	n.Handle("read", func(msg maelstrom.Message) error {
+		// Unmarshal the message body as an loosely-typed map.
+		var body map[string]any
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+		// Update the message type to return back.
+		body["type"] = "read_ok"
+
+		// Return the "message" values
+		body["messages"] = messages
+
+		// Echo the original message back with the updated message type.
+		return n.Reply(msg, body)
+	})
+
+	n.Handle("topology", func(msg maelstrom.Message) error {
+		// Unmarshal the message body as an loosely-typed map.
+		var body map[string]any
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+
+		// Update the topology
+		topology, err := convertToMap(body["topology"])
+		if err != nil {
+			return err
+		}
+		myNeighbors := topology[n.ID()]
+		if len(myNeighbors) != 0 {
+			neighbors = myNeighbors
+		}
+
+		// Update the message type to return back.
+		body["type"] = "topology_ok"
+
+		// Ignore the "topology" info
+		delete(body, "topology")
+
+		// Echo the original message back with the updated message type.
+		return n.Reply(msg, body)
+	})
+
+	if err := n.Run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func convertToMap(input interface{}) (map[string][]string, error) {
+	result := make(map[string][]string)
+
+	val := reflect.ValueOf(input)
+	typ := reflect.TypeOf(input)
+
+	// Check if the input type is a map
+	if typ.Kind() == reflect.Map {
+		for _, key := range val.MapKeys() {
+			v := reflect.ValueOf(val.MapIndex(key).Interface())
+			numNodes := v.Len()
+			nodes := make([]string, numNodes)
+			for i := 0; i < numNodes; i++ {
+				nodes[i] = fmt.Sprintf("%v", v.Index(i))
+			}
+			result[fmt.Sprintf("%v", key.Interface())] = nodes
+		}
+		return result, nil
+	}
+
+	// Add more type cases as needed
+
+	return nil, fmt.Errorf("unsupported type: %T", input)
+}
+
+func isExistingMessage(message int, messages []int) bool {
+	for _, value := range messages {
+		if value == message {
+			return true
+		}
+	}
+	return false
+}
